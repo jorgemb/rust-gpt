@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 async-openai = "0.13.0"
+chrono = "0.4.26"
+derive_builder = "0.12.0"
 rand = "0.8.5"
 regex = "1.9.3"
 serde = { version = "1.0.183", features = ["derive"] }
