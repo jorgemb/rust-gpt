@@ -64,7 +64,7 @@ async fn conversations(){
 
     // Update the conversation
     let message = "What is the best way to conquer the World peacefully?";
-    conversation.add_message(message)
+    conversation.add_query(message)
         .expect("error writing message");
 
     assert!(conversation.has_changed());
@@ -79,4 +79,28 @@ async fn conversations(){
     let conversation = manager.get_conversation(&name).await
         .expect("get conversation again");
     assert!(!conversation.has_changed());
+}
+
+#[tokio::test]
+#[ignore]
+async fn conversation_completion(){
+    let temp_dir = TempDirectoryHandler::build().expect("temp directory");
+    let mut manager = ConversationManager::build(temp_dir.path())
+        .await.expect("Build manager");
+
+    let parameters = ConversationParametersBuilder::default()
+        .build()
+        .expect("conversation parameters");
+    let name = manager.new_conversation(parameters)
+        .await.expect("new conversation");
+
+    let conversation = manager.get_conversation(&name)
+        .await.expect("get conversation");
+    conversation.add_query("Write a haiku about the gaia theory.")
+        .expect("write message");
+
+    manager.complete_conversation(&name).await.expect("complete conversation");
+    let conversation = manager.get_conversation(&name).await.expect("get conversation after completion");
+
+    println!("Message from OpenAI: {}", conversation.get_last_response().expect("get response"));
 }

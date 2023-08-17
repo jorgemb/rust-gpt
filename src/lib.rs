@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use async_openai::types::Role;
+use async_openai::config::OpenAIConfig;
+use async_openai::types::{ChatCompletionRequestMessageArgs, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, Role};
 use derive_builder::Builder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,12 @@ pub enum RustGPTError {
     #[error("Couldn't write conversation {0}")]
     WriteConversation(String),
 
+    #[error("Error interacting with OpenAI")]
+    ClientError(#[from] async_openai::error::OpenAIError),
+
+    #[error("Couldn't get an answer from the client: {0}")]
+    ResponseError(String),
+
     #[error("Last message in the conversation is from user")]
     LastMessageFromUser(),
 
@@ -49,11 +56,14 @@ pub struct ConversationParameters {
     #[builder(default = "String::from(\"gpt-3.5-turbo\")")]
     model: String,
 
+    #[builder(default = "256")]
+    max_tokens: u16,
+
     #[builder(default = "String::from(\"You are a helpful assistant\")")]
     system_message: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ConversationMessage {
     pub role: Role,
     pub content: String,
@@ -113,13 +123,13 @@ impl Conversation {
     /// use rust_gpt::{Conversation, ConversationParameters, ConversationParametersBuilder};
     /// let mut conversation = Conversation::new(ConversationParametersBuilder::default().build().unwrap());
     ///
-    /// let res = conversation.add_message("What is the best way to write Rust code?");
+    /// let res = conversation.add_query("What is the best way to write Rust code?");
     /// assert!(res.is_ok());
     ///
-    /// let res = conversation.add_message("Whoops! Last message is from the user.");
+    /// let res = conversation.add_query("Whoops! Last message is from the user.");
     /// assert!(res.is_err());
     /// ```
-    pub fn add_message(&mut self, message: &str) -> Result<()> {
+    pub fn add_query(&mut self, message: &str) -> Result<()> {
 
         // Check if the last interaction is from the User
         if let Some(last_interaction) = self.interactions.last() {
@@ -136,6 +146,12 @@ impl Conversation {
         Ok(())
     }
 
+    /// Adds a response to the interactions
+    fn add_response(&mut self, content: String) {
+        self.updated = true;
+        self.interactions.push(ConversationMessage{ role: Role::Assistant, content});
+    }
+
     /// Returns the last response from the server.
     pub fn get_last_response(&self) -> Option<&str> {
         self.interactions.iter()
@@ -150,7 +166,7 @@ impl Conversation {
     }
 
     /// Returns if the conversation needs updating
-    fn has_changed(&self) -> bool{
+    fn has_changed(&self) -> bool {
         self.updated
     }
 
@@ -158,12 +174,44 @@ impl Conversation {
     fn mark_updated(&mut self) {
         self.updated = false;
     }
+
+    /// Creates an OpenAI request
+    fn create_request(&self) -> Result<CreateChatCompletionRequest> {
+        let mut messages = Vec::with_capacity(self.interactions.len() + 1);
+        messages.push(
+            ChatCompletionRequestMessageArgs::default()
+                .role(Role::System)
+                .content(self.parameters.system_message.clone())
+                .build()?
+        );
+        messages.extend(
+            self.interactions.iter().cloned().map(
+                |msg| ChatCompletionRequestMessageArgs::default()
+                    .role(msg.role)
+                    .content(msg.content)
+                    .build().unwrap()
+            )
+        );
+
+        let chat_completion = CreateChatCompletionRequestArgs::default()
+            .n(self.parameters.n)
+            .model(&self.parameters.model)
+            .temperature(self.parameters.temperature)
+            .max_tokens(self.parameters.max_tokens)
+            .messages(messages)
+            .build()?;
+
+        Ok(chat_completion)
+    }
 }
 
 /// Helps with creating, saving and loading conversations.
 pub struct ConversationManager {
     base_path: PathBuf,
     conversations: HashMap<String, Option<Conversation>>,
+
+    // OpenAI client
+    client: async_openai::Client<OpenAIConfig>,
 }
 
 impl ConversationManager {
@@ -171,6 +219,8 @@ impl ConversationManager {
 
     /// The ConversationManager helps managing the directory where all the conversations are stored.
     /// Helps discovering, managing and updating each of the files.
+    ///
+    /// This reads the `OPENAI_API_KEY` from the environmental variables to create the client.
     ///
     /// # Arguments
     ///
@@ -193,10 +243,15 @@ impl ConversationManager {
         fs::create_dir_all(&base_path).await?;
         let conversations = HashMap::new();
 
+        // Create client
+        let client = async_openai::Client::new();
+
         // Create manager and refresh conversations
         let mut conversation_manager = ConversationManager {
             base_path,
             conversations,
+
+            client,
         };
         conversation_manager.refresh_conversations().await?;
 
@@ -285,7 +340,7 @@ impl ConversationManager {
     pub async fn new_conversation(&mut self, parameters: ConversationParameters) -> Result<String> {
         // Create conversation and save
         let name = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
-        let mut conversation = Conversation::new(parameters);
+        let conversation = Conversation::new(parameters);
 
         // Insert into the map
         self.conversations.insert(name.clone(), Some(conversation));
@@ -305,8 +360,13 @@ impl ConversationManager {
     async fn save_conversation(&mut self, name: &str) -> Result<()> {
         let path = self.conversation_path(name);
 
-        // Serialize the conversation
+        // Get the conversation
         let conversation = self.get_conversation(name).await?;
+        if !conversation.has_changed() {
+            return Ok(());
+        }
+
+        // Serialize the conversation
         let content = serde_yaml::to_string(conversation)?;
 
         // Save to disk
@@ -314,6 +374,37 @@ impl ConversationManager {
             return Err(RustGPTError::WriteConversation(name.to_string()));
         };
         conversation.mark_updated();
+
+        Ok(())
+    }
+
+    /// Does a completion of the conversation by calling the OpenAI client
+    ///
+    /// # Arguments
+    ///
+    /// * `name`: Name of the conversation to complete
+    ///
+    /// returns: Result<(), RustGPTError>
+    pub async fn complete_conversation(&mut self, name: &str) -> Result<()>{
+        let request = self.get_conversation(name)
+            .await?.create_request()?;
+
+        let response = self.client.chat().create(request).await?;
+
+        // TODO: Handle multiple messages
+        if response.choices.len() > 1{
+            unimplemented!()
+        }
+
+        let Some(first_choice) = response.choices.first().cloned() else {
+            return Err(RustGPTError::ResponseError("Blank response".to_string()))
+        };
+        let Some(content) = first_choice.message.content else {
+            return Err(RustGPTError::ResponseError("Blank message".to_string()))
+        };
+
+        let conversation = self.get_conversation(name).await?;
+        conversation.add_response(content);
 
         Ok(())
     }
