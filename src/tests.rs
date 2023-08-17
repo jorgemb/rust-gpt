@@ -44,8 +44,8 @@ async fn conversations(){
         .await.expect("manager creation");
 
     // Get invalid conversation
-    let invalid_conversation = manager.get_conversation("anything");
-    assert!(invalid_conversation.is_none());
+    let invalid_conversation = manager.get_conversation("anything").await;
+    assert!(invalid_conversation.is_err());
 
     // Create new conversation
     let name = manager.new_conversation(
@@ -55,10 +55,28 @@ async fn conversations(){
     assert!(name.starts_with(&chrono::Utc::now().format("%Y%m%d").to_string()));
 
     // Get the conversation
-    let conversation = manager.get_conversation(&name).expect("get conversation");
-    assert!(!conversation.updated);
+    let conversation = manager.get_conversation(&name).await.expect("get conversation");
+    assert!(!conversation.has_changed());
     assert_eq!(conversation.interactions.len(), 0);
 
     let path = temp_dir.path().join(format!("{}{}.yaml", ConversationManager::CONVERSATION_PREFIX, name));
     assert!(path.exists());
+
+    // Update the conversation
+    let message = "What is the best way to conquer the World peacefully?";
+    conversation.add_message(message)
+        .expect("error writing message");
+
+    assert!(conversation.has_changed());
+    assert!(conversation.get_last_response().is_none());
+
+    // Save the conversation
+    manager.save_conversation(&name).await.expect("save conversation");
+    let conversation_path = temp_dir.path()
+        .join(format!("{}{}.yaml", ConversationManager::CONVERSATION_PREFIX, name));
+    assert!(conversation_path.exists());
+
+    let conversation = manager.get_conversation(&name).await
+        .expect("get conversation again");
+    assert!(!conversation.has_changed());
 }
