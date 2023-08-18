@@ -96,7 +96,7 @@ async fn conversation_completion(){
 
     let conversation = manager.get_conversation(&name)
         .await.expect("get conversation");
-    conversation.add_query("Write a haiku about the gaia theory.")
+    conversation.add_query("A poem about the KNM dutch exam.")
         .expect("write message");
 
     manager.complete_conversation(&name).await.expect("complete conversation");
