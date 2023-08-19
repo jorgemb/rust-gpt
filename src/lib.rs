@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_openai::config::OpenAIConfig;
 use async_openai::types::{ChatCompletionRequestMessageArgs, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, Role};
 use derive_builder::Builder;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{fs, io};
@@ -40,6 +39,9 @@ pub enum RustGPTError {
 
     #[error("Couldn't find conversation with name {0}")]
     ConversationNotFound(String),
+
+    #[error("No client given to the Conversation")]
+    NoClientSpecified,
 }
 
 type Result<T> = core::result::Result<T, RustGPTError>;
@@ -75,35 +77,69 @@ pub struct Conversation {
     interactions: Vec<ConversationMessage>,
 
     // Set to true when the conversation has been changed and needs to be saved to disk
+    #[serde(skip)]
     updated: bool,
+
+    // Path to where the file is stored
+    #[serde(skip)]
+    path: PathBuf,
+
+    // Name of the conversation
+    #[serde(skip)]
+    name: String,
+
+    // Client reference for own calls
+    #[serde(skip)]
+    client: Option<ClientRef>,
 }
 
 impl Conversation {
-    /// Creates a new Conversation object with the provided parameters
+    /// Creates a new Conversation object with the provided parameters. The conversation has
+    /// a path but hasn't been stored in the filesystem yet.
     ///
     /// # Arguments
     ///
-    /// * `parameters`:
+    /// * `parameters`: Conversation parameters
+    /// * `path`: Path to where the `Conversation` is being stored.
     ///
     /// returns: Conversation
     ///
     /// # Examples
     ///
     /// ```
+    /// use std::path::PathBuf;
     /// use rust_gpt::{Conversation, ConversationParametersBuilder};
     /// let parameters = ConversationParametersBuilder::default()
     ///     .n(1)
     ///     .model(String::from("gpt-3.5-turbo"))
+    ///     .system_message(String::from("You are a helpful assistant."))
     ///     .build()
     ///     .unwrap();
     ///
-    /// let conversation = Conversation::new(parameters);
+    /// let mut conversation = Conversation::new(parameters, PathBuf::new(), None);
+    /// assert!(conversation.has_changed());
+    /// assert!(conversation.interactions().is_empty());
+    ///
+    /// conversation.add_query("Help me create a good ChatGPT rust library.")
+    /// .expect("Add query");
+    ///
+    /// assert!(conversation.add_query("Second query should fail until a response is obtained")
+    /// .is_err());
     /// ```
-    pub fn new(parameters: ConversationParameters) -> Self {
+    pub fn new(parameters: ConversationParameters, path: PathBuf, client: Option<ClientRef>) -> Self {
+        let name = path.file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default()
+            .to_string();
+
         Conversation {
             parameters,
             interactions: Vec::new(),
             updated: true,
+            path,
+            name,
+            client,
         }
     }
 
@@ -120,8 +156,9 @@ impl Conversation {
     /// # Examples
     ///
     /// ```
+    /// use std::path::PathBuf;
     /// use rust_gpt::{Conversation, ConversationParameters, ConversationParametersBuilder};
-    /// let mut conversation = Conversation::new(ConversationParametersBuilder::default().build().unwrap());
+    /// let mut conversation = Conversation::new(ConversationParametersBuilder::default().build().unwrap(), PathBuf::new(), None);
     ///
     /// let res = conversation.add_query("What is the best way to write Rust code?");
     /// assert!(res.is_ok());
@@ -146,12 +183,6 @@ impl Conversation {
         Ok(())
     }
 
-    /// Adds a response to the interactions
-    fn add_response(&mut self, content: String) {
-        self.updated = true;
-        self.interactions.push(ConversationMessage{ role: Role::Assistant, content});
-    }
-
     /// Returns the last response from the server.
     pub fn get_last_response(&self) -> Option<&str> {
         self.interactions.iter()
@@ -160,13 +191,48 @@ impl Conversation {
             .map(|r| r.content.as_str())
     }
 
+    /// Perform a completion request
+    pub async fn do_completion(&mut self) -> Result<()> {
+        // Get a reference to the client
+        let Some(client) = &self.client else {
+            return Err(RustGPTError::NoClientSpecified);
+        };
+
+        // Create the request
+        let Ok(request) = self.create_request() else {
+            return Err(RustGPTError::NoClientSpecified);
+        };
+
+        // Send request to client
+        let response = client.chat().create(request).await?;
+
+        // Parse response
+        if response.choices.len() > 1 {
+            unimplemented!("Multiple choices are not implemented yet...");
+        }
+
+        if let Some(answer) = response.choices.into_iter().next() {
+            self.interactions.push(
+                ConversationMessage {
+                    role: answer.message.role,
+                    content: answer.message.content.unwrap_or_default(),
+                }
+            );
+            self.updated = true;
+
+            Ok(())
+        } else {
+            Err(RustGPTError::ResponseError("No choice in response".to_string()))
+        }
+    }
+
     /// Returns the list of messages associated to the conversation.
     pub fn interactions(&self) -> &Vec<ConversationMessage> {
         &self.interactions
     }
 
     /// Returns if the conversation needs updating
-    fn has_changed(&self) -> bool {
+    pub fn has_changed(&self) -> bool {
         self.updated
     }
 
@@ -203,20 +269,24 @@ impl Conversation {
 
         Ok(chat_completion)
     }
+
+    /// Returns the name of the conversation
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
+
+type ClientRef = Arc<async_openai::Client<OpenAIConfig>>;
 
 /// Helps with creating, saving and loading conversations.
 pub struct ConversationManager {
     base_path: PathBuf,
-    conversations: HashMap<String, Option<Conversation>>,
 
     // OpenAI client
-    client: async_openai::Client<OpenAIConfig>,
+    client: ClientRef,
 }
 
 impl ConversationManager {
-    const CONVERSATION_PREFIX: &'static str = "conversation_";
-
     /// The ConversationManager helps managing the directory where all the conversations are stored.
     /// Helps discovering, managing and updating each of the files.
     ///
@@ -241,60 +311,38 @@ impl ConversationManager {
             )));
         }
         fs::create_dir_all(&base_path).await?;
-        let conversations = HashMap::new();
 
         // Create client
-        let client = async_openai::Client::new();
+        let client = Arc::new(async_openai::Client::new());
 
         // Create manager and refresh conversations
-        let mut conversation_manager = ConversationManager {
+        let conversation_manager = ConversationManager {
             base_path,
-            conversations,
-
             client,
         };
-        conversation_manager.refresh_conversations().await?;
 
         Ok(conversation_manager)
-    }
-
-    /// Refreshes the conversations by loading the list of files from the filesystem.
-    pub async fn refresh_conversations(&mut self) -> Result<()> {
-        // Create new list
-        let mut conversations = HashMap::with_capacity(self.conversations.len());
-
-        // Load current conversations
-        let conversation_pattern = Regex::new(r"conversation_([0-9]+)\.yaml").expect("Bad regex");
-        let mut entries = fs::read_dir(&self.base_path).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            // Ignore directories
-            if path.is_dir() {
-                continue;
-            }
-
-            // Check if name follows pattern
-            let Some(file_name) = path.file_name() else { continue; };
-            let Some(file_name) = file_name.to_str() else { continue; };
-            let Some(captures) = conversation_pattern.captures(file_name) else { continue; };
-            let Some(timestamp) = captures.get(1) else { continue; };
-            let timestamp = timestamp.as_str();
-
-            let previous = self.conversations.entry(timestamp.to_string()).or_default().take();
-            conversations.insert(timestamp.to_string(), previous);
-        }
-
-        // Overwrite
-        self.conversations = conversations;
-
-        Ok(())
     }
 
     pub fn base_path(&self) -> &PathBuf {
         &self.base_path
     }
-    pub fn conversations(&self) -> Vec<String> {
-        self.conversations.keys().cloned().collect()
+
+    /// Returns a list of the conversations within the path
+    pub async fn get_conversations(&self) -> Result<Vec<String>> {
+        // Returns the name of all conversations within the path
+        let mut entries = fs::read_dir(self.base_path()).await?;
+
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            if let Some(file_name) = entry.file_name().to_str() {
+                if file_name.ends_with(".yaml") {
+                    names.push(file_name.to_string());
+                }
+            }
+        }
+
+        Ok(names)
     }
 
     /// Creates the path of a given Conversation
@@ -306,28 +354,25 @@ impl ConversationManager {
     /// returns: PathBuf
     ///
     fn conversation_path(&self, conversation: &str) -> PathBuf {
-        self.base_path.join(format!("{}{}.yaml", Self::CONVERSATION_PREFIX, conversation))
+        self.base_path.join(conversation)
     }
 
     /// Returns the conversation with the given name
-    pub async fn get_conversation(&mut self, name: &str) -> Result<&mut Conversation> {
+    pub async fn load_conversation(&mut self, name: &str) -> Result<Conversation> {
         // Find conversation
         let path = self.conversation_path(name);
-        let Some(conversation) = self.conversations.get_mut(name) else {
-            return Err(RustGPTError::ConversationNotFound(name.to_string()));
-        };
 
-        // Check if the conversation has been loaded
-        if conversation.is_none() {
-            // Load conversation from disk
-            let content = fs::read_to_string(path).await?;
+        // Load conversation from disk
+        let content = fs::read_to_string(&path).await?;
 
-            // Deserialize and update in the hashmap
-            let loaded_conversation: Conversation = serde_yaml::from_str(&content)?;
-            *conversation = Some(loaded_conversation);
-        }
+        // Deserialize and update
+        let mut loaded_conversation: Conversation = serde_yaml::from_str(&content)?;
+        loaded_conversation.client = Some(self.client.clone());
+        loaded_conversation.path = path;
+        loaded_conversation.name = name.to_string();
+        loaded_conversation.mark_updated();
 
-        Ok(conversation.as_mut().unwrap())
+        Ok(loaded_conversation)
     }
 
     /// Creates a new empty conversation and returns the name
@@ -337,17 +382,13 @@ impl ConversationManager {
     /// * `parameters`:
     ///
     /// returns: Result<String, RustGPTError>
-    pub async fn new_conversation(&mut self, parameters: ConversationParameters) -> Result<String> {
+    pub async fn new_conversation(&mut self, parameters: ConversationParameters) -> Result<Conversation> {
         // Create conversation and save
-        let name = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
-        let conversation = Conversation::new(parameters);
+        let name = chrono::Utc::now().format("%Y%m%d%H%M%S.yaml").to_string();
+        let path = self.base_path().join(name);
+        let conversation = Conversation::new(parameters, path, Some(self.client.clone()));
 
-        // Insert into the map
-        self.conversations.insert(name.clone(), Some(conversation));
-
-        // Save by name
-        self.save_conversation(&name).await?;
-        Ok(name)
+        Ok(conversation)
     }
 
     /// Saves the conversation to disk. Updates the conversation to mark `updated` as false.
@@ -357,11 +398,8 @@ impl ConversationManager {
     /// * `name`: Name of the conversation (timestamp)
     ///
     /// returns: Result<(), RustGPTError>
-    async fn save_conversation(&mut self, name: &str) -> Result<()> {
-        let path = self.conversation_path(name);
-
-        // Get the conversation
-        let conversation = self.get_conversation(name).await?;
+    pub async fn save_conversation(&mut self, conversation: &mut Conversation) -> Result<()> {
+        // Check if the conversation has changed
         if !conversation.has_changed() {
             return Ok(());
         }
@@ -370,41 +408,10 @@ impl ConversationManager {
         let content = serde_yaml::to_string(conversation)?;
 
         // Save to disk
-        let Ok(_) = fs::write(path, content).await else {
-            return Err(RustGPTError::WriteConversation(name.to_string()));
+        let Ok(_) = fs::write(&conversation.path, content).await else {
+            return Err(RustGPTError::WriteConversation(conversation.path.display().to_string()));
         };
         conversation.mark_updated();
-
-        Ok(())
-    }
-
-    /// Does a completion of the conversation by calling the OpenAI client
-    ///
-    /// # Arguments
-    ///
-    /// * `name`: Name of the conversation to complete
-    ///
-    /// returns: Result<(), RustGPTError>
-    pub async fn complete_conversation(&mut self, name: &str) -> Result<()>{
-        let request = self.get_conversation(name)
-            .await?.create_request()?;
-
-        let response = self.client.chat().create(request).await?;
-
-        // TODO: Handle multiple messages
-        if response.choices.len() > 1{
-            unimplemented!()
-        }
-
-        let Some(first_choice) = response.choices.first().cloned() else {
-            return Err(RustGPTError::ResponseError("Blank response".to_string()))
-        };
-        let Some(content) = first_choice.message.content else {
-            return Err(RustGPTError::ResponseError("Blank message".to_string()))
-        };
-
-        let conversation = self.get_conversation(name).await?;
-        conversation.add_response(content);
 
         Ok(())
     }

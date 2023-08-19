@@ -8,7 +8,9 @@ async fn empty_manager_creation() {
 
     let manager = ConversationManager::build(temp_dir.path())
         .await.expect("Couldn't create conversation manager");
-    assert!(manager.conversations.is_empty());
+
+    let conversations = manager.get_conversations().await.expect("Load conversations");
+    assert!(conversations.is_empty());
 }
 
 #[tokio::test]
@@ -17,10 +19,10 @@ async fn manager_creation() {
 
     // Create random files
     let path = temp_dir.path();
-    let valid = vec!["123456", "20230814092231", "2023"];
-    let invalid = vec!["conversation_.yaml", "other.yaml", "conversation_234234.txt", "random.txt"];
+    let valid = vec!["123456.yaml", "20230814092231.yaml", "2023.yaml"];
+    let invalid = vec!["conversation_234234.txt", "random.txt"];
 
-    for filename in valid.iter().map(|&v| format!("conversation_{}.yaml", v)).chain(invalid.iter().map(|&v| v.to_string())){
+    for filename in valid.iter().chain(invalid.iter()){
         fs::write(path.join(filename), "").await.expect("Couldn't write file");
     }
 
@@ -28,10 +30,12 @@ async fn manager_creation() {
     let manager = ConversationManager::build(path)
         .await.expect("Couldn't create conversation manager");
 
-    assert!(!manager.conversations.is_empty());
-    assert_eq!(manager.conversations.len(), valid.len());
+    let conversations = manager.get_conversations().await.expect("load conversations");
 
-    for element in manager.conversations.keys(){
+    assert!(!conversations.is_empty());
+    assert_eq!(conversations.len(), valid.len());
+
+    for element in conversations.iter(){
         assert!(valid.contains(&element.as_str()));
         assert!(!invalid.contains(&element.as_str()));
     }
@@ -44,23 +48,25 @@ async fn conversations(){
         .await.expect("manager creation");
 
     // Get invalid conversation
-    let invalid_conversation = manager.get_conversation("anything").await;
+    let invalid_conversation = manager.load_conversation("does_not_exist.yaml").await;
     assert!(invalid_conversation.is_err());
 
     // Create new conversation
-    let name = manager.new_conversation(
+    let mut conversation = manager.new_conversation(
         ConversationParametersBuilder::default().build().expect("conversation builder")
     ).await.expect("new conversation");
+    assert!(conversation.has_changed());
+    assert!(!conversation.path.exists());
 
-    assert!(name.starts_with(&chrono::Utc::now().format("%Y%m%d").to_string()));
+    // Save the conversation
+    manager.save_conversation(&mut conversation).await.expect("save conversation");
+    assert!(!conversation.has_changed());
+    assert!(conversation.path.exists());
 
-    // Get the conversation
-    let conversation = manager.get_conversation(&name).await.expect("get conversation");
+    // Load the conversation
+    let mut conversation = manager.load_conversation(conversation.name()).await.expect("get conversation");
     assert!(!conversation.has_changed());
     assert_eq!(conversation.interactions.len(), 0);
-
-    let path = temp_dir.path().join(format!("{}{}.yaml", ConversationManager::CONVERSATION_PREFIX, name));
-    assert!(path.exists());
 
     // Update the conversation
     let message = "What is the best way to conquer the World peacefully?";
@@ -71,12 +77,10 @@ async fn conversations(){
     assert!(conversation.get_last_response().is_none());
 
     // Save the conversation
-    manager.save_conversation(&name).await.expect("save conversation");
-    let conversation_path = temp_dir.path()
-        .join(format!("{}{}.yaml", ConversationManager::CONVERSATION_PREFIX, name));
-    assert!(conversation_path.exists());
+    manager.save_conversation(&mut conversation).await.expect("save conversation");
+    assert!(conversation.path.exists());
 
-    let conversation = manager.get_conversation(&name).await
+    let conversation = manager.load_conversation(conversation.name()).await
         .expect("get conversation again");
     assert!(!conversation.has_changed());
 }
@@ -88,19 +92,20 @@ async fn conversation_completion(){
     let mut manager = ConversationManager::build(temp_dir.path())
         .await.expect("Build manager");
 
+    // Create new conversation
     let parameters = ConversationParametersBuilder::default()
         .build()
         .expect("conversation parameters");
-    let name = manager.new_conversation(parameters)
+    let mut conversation = manager.new_conversation(parameters)
         .await.expect("new conversation");
 
-    let conversation = manager.get_conversation(&name)
-        .await.expect("get conversation");
-    conversation.add_query("A poem about the KNM dutch exam.")
+    // Add message and save
+    conversation.add_query("A haiku about the KNM dutch exam.")
         .expect("write message");
+    manager.save_conversation(&mut conversation).await.expect("save conversation");
+    assert!(!conversation.has_changed(), "Conversation should not be changed after saving");
 
-    manager.complete_conversation(&name).await.expect("complete conversation");
-    let conversation = manager.get_conversation(&name).await.expect("get conversation after completion");
-
+    conversation.do_completion().await.expect("complete conversation");
     println!("Message from OpenAI: {}", conversation.get_last_response().expect("get response"));
+    assert!(conversation.has_changed(), "Conversation should be marked as change after completion");
 }
