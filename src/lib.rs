@@ -81,6 +81,9 @@ pub struct Conversation {
     parameters: ConversationParameters,
     interactions: Vec<ConversationMessage>,
 
+    // Name of the parent conversation (when branching occurs)
+    parent: Option<String>,
+
     // Set to true when the conversation has been changed and needs to be saved to disk
     #[serde(skip)]
     updated: bool,
@@ -122,8 +125,9 @@ impl Conversation {
     ///     .unwrap();
     ///
     /// let mut conversation = Conversation::new(parameters, PathBuf::new(), None);
-    /// assert!(conversation.has_changed());
-    /// assert!(conversation.interactions().is_empty());
+    /// assert!(conversation.has_changed(), "New conversations are marked as changed as they haven't been saved.");
+    /// assert!(conversation.interactions().is_empty(), "New conversations have no interactions");
+    /// assert!(conversation.parent().is_none(), "New conversations have not parents");
     ///
     /// conversation.add_query("Help me create a good ChatGPT rust library.")
     /// .expect("Add query");
@@ -142,6 +146,7 @@ impl Conversation {
             parameters,
             interactions: Vec::new(),
             updated: true,
+            parent: None,
             path,
             name,
             client,
@@ -287,6 +292,11 @@ impl Conversation {
     /// Returns the name of the conversation
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the name of the conversation's parent (if any)
+    pub fn parent(&self) -> &Option<String> {
+        &self.parent
     }
 }
 
