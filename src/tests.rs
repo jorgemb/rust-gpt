@@ -99,13 +99,19 @@ async fn conversation_completion(){
     let mut conversation = manager.new_conversation(parameters)
         .await.expect("new conversation");
 
+    // Trying a completion should give error
+    assert!(conversation.do_completion().await.is_err(), "No query has been given.");
+
     // Add message and save
-    conversation.add_query("A haiku about the KNM dutch exam.")
+    conversation.add_query("A small poem that highlights Rust language features.")
         .expect("write message");
     manager.save_conversation(&mut conversation).await.expect("save conversation");
-    assert!(!conversation.has_changed(), "Conversation should not be changed after saving");
+    assert!(!conversation.has_changed(), "Conversation should be marked as not changed after saving");
 
     conversation.do_completion().await.expect("complete conversation");
     println!("Message from OpenAI: {}", conversation.get_last_response().expect("get response"));
     assert!(conversation.has_changed(), "Conversation should be marked as change after completion");
+
+    // Another completion should result in error
+    assert!(conversation.do_completion().await.is_err(), "No query has been given. Last response from System.");
 }

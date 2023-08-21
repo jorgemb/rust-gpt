@@ -42,6 +42,9 @@ pub enum RustGPTError {
 
     #[error("No client given to the Conversation")]
     NoClientSpecified,
+
+    #[error("No query has been specified for the completion")]
+    NoQueryGiven,
 }
 
 type Result<T> = core::result::Result<T, RustGPTError>;
@@ -71,6 +74,8 @@ pub struct ConversationMessage {
     pub content: String,
 }
 
+/// Represents a Conversation with OpenAI, with initial parameters and
+/// all interactions.
 #[derive(Serialize, Deserialize)]
 pub struct Conversation {
     parameters: ConversationParameters,
@@ -197,6 +202,15 @@ impl Conversation {
         let Some(client) = &self.client else {
             return Err(RustGPTError::NoClientSpecified);
         };
+
+        // A completion can only be requested if the last message is a query
+        if let Some(last_interaction) = self.interactions.last(){
+            if last_interaction.role != Role::User{
+                return Err(RustGPTError::NoQueryGiven)
+            }
+        } else {
+            return Err(RustGPTError::NoQueryGiven)
+        }
 
         // Create the request
         let Ok(request) = self.create_request() else {
