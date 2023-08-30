@@ -21,7 +21,7 @@ pub enum RustGPTError {
     #[error("Error while serializing/deserializing")]
     Serialization(#[from] serde_yaml::Error),
 
-    #[error("Couldn't write conversation {0}")]
+    #[error("Couldn't write conversation {0} to disk")]
     WriteConversation(String),
 
     #[error("Error interacting with OpenAI")]
@@ -30,8 +30,8 @@ pub enum RustGPTError {
     #[error("Couldn't get an answer from the client: {0}")]
     ResponseError(String),
 
-    #[error("Last message in the conversation is from user")]
-    LastMessageFromUser(),
+    #[error("Bad conversation: {0}")]
+    BadMessage(String),
 
     #[error("Couldn't find conversation with name {0}")]
     ConversationNotFound(String),
@@ -41,6 +41,12 @@ pub enum RustGPTError {
 
     #[error("No query has been specified for the completion")]
     NoQueryGiven,
+
+    #[error("Queried a message that is not a part of the conversation")]
+    MessageNotPartOfConversation,
+
+    #[error("The given message role is invalid for the current requirement")]
+    InvalidMessageRole,
 }
 
 pub type Result<T> = core::result::Result<T, RustGPTError>;
