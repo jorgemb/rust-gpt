@@ -2,63 +2,6 @@ use crate::test_util::TempDirectoryHandler;
 
 use super::*;
 
-// #[tokio::test]
-// async fn empty_manager_creation() {
-//     let temp_dir = TempDirectoryHandler::build().expect("Couldn't create temp dir");
-//
-//     let manager = ConversationManager::build(temp_dir.path())
-//         .await.expect("Couldn't create conversation manager");
-//
-//     let conversations = manager.get_conversations().await.expect("Load conversations");
-//     assert!(conversations.is_empty());
-// }
-//
-// #[tokio::test]
-// async fn manager_creation() {
-//     let temp_dir = TempDirectoryHandler::build().expect("Couldn't create temp dir");
-//
-//     // Create random files
-//     let path = temp_dir.path();
-//     let valid = vec!["123456.yaml", "20230814092231.yaml", "2023.yaml"];
-//     let invalid = vec!["conversation_234234.txt", "random.txt"];
-//
-//     for filename in valid.iter().chain(invalid.iter()){
-//         fs::write(path.join(filename), "").await.expect("Couldn't write file");
-//     }
-//
-//     // Check that the test manager can find the valid paths
-//     let manager = ConversationManager::build(path)
-//         .await.expect("Couldn't create conversation manager");
-//
-//     let conversations = manager.get_conversations().await.expect("load conversations");
-//
-//     assert!(!conversations.is_empty());
-//     assert_eq!(conversations.len(), valid.len());
-//
-//     for element in conversations.iter(){
-//         assert!(valid.contains(&element.as_str()));
-//         assert!(!invalid.contains(&element.as_str()));
-//     }
-// }
-
-// #[tokio::test]
-// async fn conversations_creation_with_manager() {
-//     let temp_dir = TempDirectoryHandler::build().expect("create temp dir");
-//     let mut manager = ConversationManager::build(temp_dir.path())
-//         .await.expect("manager creation");
-//
-//     // Get invalid conversation
-//     let invalid_conversation = manager.load_conversation("does_not_exist.yaml").await;
-//     assert!(invalid_conversation.is_err());
-//
-//     // Create new conversation
-//     let mut conversation = manager.new_conversation(
-//         ConversationParametersBuilder::default().build().expect("conversation builder")
-//     ).await.expect("new conversation");
-//     assert!(conversation.has_changed());
-//     assert!(!conversation.path.exists());
-// }
-
 #[tokio::test]
 async fn conversation_operations() {
     let temp_dir = TempDirectoryHandler::build().expect("temp dir");
@@ -114,38 +57,58 @@ async fn conversation_operations() {
 
     assert_eq!(message_list.len(), 3);
     let expected_content = vec![system_message, "Query1", "Completion1"];
-    for (msg, expected) in message_list.iter().zip(expected_content){
+    for (msg, expected) in message_list.iter().zip(expected_content) {
         assert_eq!(msg.content.as_str(), expected);
+    }
+
+    // Get all the siblings of a message
+    let siblings = conversation.get_message_siblings(first_message_id)
+        .expect("get siblings");
+
+    assert_eq!(siblings.len(), queries.len() * 2);
+    for (id, s) in siblings.into_iter().enumerate() {
+        let n = (id % 3) + 1;
+        assert_eq!(s.content, format!("Query{}", n));
     }
 }
 
-// #[tokio::test]
-// #[ignore]
-// async fn conversation_completion(){
-//     let temp_dir = TempDirectoryHandler::build().expect("temp directory");
-//     let mut manager = ConversationManager::build(temp_dir.path())
-//         .await.expect("Build manager");
-//
-//     // Create new conversation
-//     let parameters = ConversationParametersBuilder::default()
-//         .build()
-//         .expect("conversation parameters");
-//     let mut conversation = manager.new_conversation(parameters)
-//         .await.expect("new conversation");
-//
-//     // Trying a completion should give error
-//     assert!(conversation.do_completion().await.is_err(), "No query has been given.");
-//
-//     // Add message and save
-//     conversation.add_query("A small poem that highlights Rust language features.")
-//         .expect("write message");
-//     manager.save_conversation(&mut conversation).await.expect("save conversation");
-//     assert!(!conversation.has_changed(), "Conversation should be marked as not changed after saving");
-//
-//     conversation.do_completion().await.expect("complete conversation");
-//     println!("Message from OpenAI: {}", conversation.get_last_response().expect("get response"));
-//     assert!(conversation.has_changed(), "Conversation should be marked as change after completion");
-//
-//     // Another completion should result in error
-//     assert!(conversation.do_completion().await.is_err(), "No query has been given. Last response from System.");
-// }
+#[tokio::test]
+#[ignore]
+async fn conversation_completion() {
+    let temp_dir = TempDirectoryHandler::build().expect("temp directory");
+    let path = temp_dir.path().join("conversation.yml");
+
+    // Create a new conversation
+    let parameters = CompletionParametersBuilder::default()
+        .n(2)
+        .model(CompletionModel::GPT35)
+        .max_tokens(128)
+        .temperature(1.0)
+        .build()
+        .expect("parameters");
+
+    let mut conversation = Conversation::build(
+        parameters,
+        path,
+        "You are a helpful assistant that must provide answers in Spanish.")
+        .expect("build conversation");
+
+    // Add query
+    let root_conversation_id = conversation.get_root_message().id;
+
+    let queries = vec![String::from("What is the greatest thing that has come out of ChatGPT")];
+    let message_id= conversation.add_queries(root_conversation_id, queries).expect("add queries")
+        .first().expect("Single query").id;
+
+    // Create a client
+    let client = create_chat_client();
+
+    // Do completion
+    let completions = conversation.do_completion(message_id, client, None)
+        .await
+        .expect("perform completions");
+
+    for c in completions{
+        println!("{:?}", c);
+    }
+}

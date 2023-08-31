@@ -76,7 +76,7 @@ impl CompletionParameters {
     pub fn model(&self) -> CompletionModel { self.model }
     pub fn max_tokens(&self) -> u16 { self.max_tokens }
 
-    pub fn with_n(&self, n: u8) -> Self{
+    pub fn with_n(&self, n: u8) -> Self {
         let mut copy = self.clone();
         copy.n = n;
 
@@ -263,10 +263,10 @@ impl Conversation {
     /// then the tree is searched so that message appears in the conversation.
     pub fn get_message_list(&self, anchor_message_id: Option<Uuid>) -> Result<Vec<&Message>> {
         let anchor = if let Some(msg_id) = anchor_message_id {
-            if let Some(msg) = self.interactions.get(&msg_id){
+            if let Some(msg) = self.interactions.get(&msg_id) {
                 msg
             } else {
-                return Err(RustGPTError::MessageNotPartOfConversation)
+                return Err(RustGPTError::MessageNotPartOfConversation);
             }
         } else {
             // Use the root as anchor
@@ -326,6 +326,19 @@ impl Conversation {
 
         ret.sort_by_key(|msg| msg.index);
         ret
+    }
+
+    /// Returns the siblings of a message, including the calling message
+    pub fn get_message_siblings(&self, message_id: Uuid) -> Result<Vec<&Message>> {
+        // Validate message id
+        let Some(message) = self.interactions.get(&message_id) else {
+            return Err(RustGPTError::MessageNotPartOfConversation);
+        };
+
+        match message.parent_id {
+            None => Ok(vec![message]),
+            Some(id) => Ok(self.get_children(id)),
+        }
     }
 
     /// Adds multiple queries to a parent message. The parent message should have a
@@ -396,28 +409,28 @@ impl Conversation {
 
     /// Performs completions for the given message id
     pub async fn do_completion(&mut self, message_id: Uuid, client: ClientRef, n_completions: Option<u8>)
-        -> Result<Vec<&Message>> {
+                               -> Result<Vec<&Message>> {
 
         // Validate that the given message is a user message
         let Some(message) = self.interactions.get(&message_id) else {
-            return Err(RustGPTError::MessageNotPartOfConversation)
+            return Err(RustGPTError::MessageNotPartOfConversation);
         };
 
         if message.role != Role::User {
-            return Err(RustGPTError::InvalidMessageRole)
+            return Err(RustGPTError::InvalidMessageRole);
         };
 
         // Get the trailing messages
         let mut messages = Vec::new();
 
         let mut current_msg = message;
-        while let Some(parent_id) = current_msg.parent_id{
+        while let Some(parent_id) = current_msg.parent_id {
             messages.push(current_msg);
 
-            if let Some(parent_msg) = self.interactions.get(&parent_id){
+            if let Some(parent_msg) = self.interactions.get(&parent_id) {
                 current_msg = parent_msg;
             } else {
-                return Err(RustGPTError::MessageNotPartOfConversation)
+                return Err(RustGPTError::MessageNotPartOfConversation);
             }
         }
         messages.push(current_msg);
@@ -426,7 +439,7 @@ impl Conversation {
         messages.reverse();
 
         // Create the completions with the client
-        let parameters = if let Some(n) = n_completions{
+        let parameters = if let Some(n) = n_completions {
             self.default_parameters.with_n(n)
         } else {
             self.default_parameters.clone()
@@ -446,7 +459,7 @@ impl Conversation {
         // Perform the completion request
         let completion = client.chat().create(completion_request).await?;
         let responses: Vec<_> = completion.choices.into_iter()
-            .filter_map(|choice| choice.message.content )
+            .filter_map(|choice| choice.message.content)
             .collect();
 
         let added_id = self.add_children_to_message(message_id, responses, Role::Assistant)?;
@@ -456,96 +469,10 @@ impl Conversation {
             .collect())
     }
 
-    // /// Returns the last response from the server.
-    // pub fn get_last_response(&self) -> Option<&str> {
-    //     self.interactions.iter()
-    //         .rev()
-    //         .find(|r| r.role == Role::Assistant)
-    //         .map(|r| r.content.as_str())
-    // }
-    //
-    // /// Perform a completion request
-    // pub async fn do_completion(&mut self) -> Result<()> {
-    //     // Get a reference to the client
-    //     let Some(client) = &self.client else {
-    //         return Err(RustGPTError::NoClientSpecified);
-    //     };
-    //
-    //     // A completion can only be requested if the last message is a query
-    //     if let Some(last_interaction) = self.interactions.last() {
-    //         if last_interaction.role != Role::User {
-    //             return Err(RustGPTError::NoQueryGiven);
-    //         }
-    //     } else {
-    //         return Err(RustGPTError::NoQueryGiven);
-    //     }
-    //
-    //     // Create the request
-    //     let Ok(request) = self.create_request() else {
-    //         return Err(RustGPTError::NoClientSpecified);
-    //     };
-    //
-    //     // Send request to client
-    //     let response = client.chat().create(request).await?;
-    //
-    //     // Parse response
-    //     if response.choices.len() > 1 {
-    //         unimplemented!("Multiple choices are not implemented yet...");
-    //     }
-    //
-    //     if let Some(answer) = response.choices.into_iter().next() {
-    //         self.interactions.push(
-    //             Message {
-    //                 role: answer.message.role,
-    //                 content: answer.message.content.unwrap_or_default(),
-    //             }
-    //         );
-    //         self.updated = true;
-    //
-    //         Ok(())
-    //     } else {
-    //         Err(RustGPTError::ResponseError("No choice in response".to_string()))
-    //     }
-    // }
-    //
-    // /// Returns the list of messages associated to the conversation.
-    // pub fn interactions(&self) -> &Vec<Message> {
-    //     &self.interactions
-    // }
-
     /// Returns if the conversation needs updating
     pub fn has_changed(&self) -> bool {
         self.updated
     }
-
-    // /// Creates an OpenAI request
-    // fn create_request(&self) -> Result<CreateChatCompletionRequest> {
-    //     let mut messages = Vec::with_capacity(self.interactions.len() + 1);
-    //     messages.push(
-    //         ChatCompletionRequestMessageArgs::default()
-    //             .role(Role::System)
-    //             .content(self.default_parameters.system_message.clone())
-    //             .build()?
-    //     );
-    //     messages.extend(
-    //         self.interactions.iter().cloned().map(
-    //             |msg| ChatCompletionRequestMessageArgs::default()
-    //                 .role(msg.role)
-    //                 .content(msg.content)
-    //                 .build().unwrap()
-    //         )
-    //     );
-    //
-    //     let chat_completion = CreateChatCompletionRequestArgs::default()
-    //         .n(self.default_parameters.n)
-    //         .model(&self.default_parameters.model)
-    //         .temperature(self.default_parameters.temperature)
-    //         .max_tokens(self.default_parameters.max_tokens)
-    //         .messages(messages)
-    //         .build()?;
-    //
-    //     Ok(chat_completion)
-    // }
 
     /// Returns the name of the conversation
     pub fn name(&self) -> &str {
@@ -571,141 +498,7 @@ impl Conversation {
 
 type ClientRef = Arc<async_openai::Client<OpenAIConfig>>;
 
-// Helps with creating, saving and loading conversations.
-// pub struct ConversationManager {
-//     base_path: PathBuf,
-//
-//     // OpenAI client
-//     client: ClientRef,
-// }
-//
-// impl ConversationManager {
-//     /// The ConversationManager helps managing the directory where all the conversations are stored.
-//     /// Helps discovering, managing and updating each of the files.
-//     ///
-//     /// This reads the `OPENAI_API_KEY` from the environmental variables to create the client.
-//     ///
-//     /// # Arguments
-//     ///
-//     /// * `path`: Base path were all the information should be stored.
-//     ///
-//     /// returns: Result<ConversationManager, RustGPTError>
-//     ///
-//     pub async fn build<P>(path: P) -> Result<ConversationManager>
-//         where P: Into<PathBuf>
-//     {
-//         let base_path: PathBuf = path.into();
-//
-//         // Check if it exists and can be created
-//         if base_path.exists() && !base_path.is_dir() {
-//             return Err(RustGPTError::Initialize(format!(
-//                 "Path {} points to a file",
-//                 base_path.display()
-//             )));
-//         }
-//         fs::create_dir_all(&base_path).await?;
-//
-//         // Create client
-//         let client = Arc::new(async_openai::Client::new());
-//
-//         // Create manager and refresh conversations
-//         let conversation_manager = ConversationManager {
-//             base_path,
-//             client,
-//         };
-//
-//         Ok(conversation_manager)
-//     }
-//
-//     pub fn base_path(&self) -> &PathBuf {
-//         &self.base_path
-//     }
-//
-//     /// Returns a list of the conversations within the path
-//     pub async fn get_conversations(&self) -> Result<Vec<String>> {
-//         // Returns the name of all conversations within the path
-//         let mut entries = fs::read_dir(self.base_path()).await?;
-//
-//         let mut names = Vec::new();
-//         while let Some(entry) = entries.next_entry().await? {
-//             if let Some(file_name) = entry.file_name().to_str() {
-//                 if file_name.ends_with(".yaml") {
-//                     names.push(file_name.to_string());
-//                 }
-//             }
-//         }
-//
-//         Ok(names)
-//     }
-//
-//     /// Creates the path of a given Conversation
-//     ///
-//     /// # Arguments
-//     ///
-//     /// * `conversation`: Name (timestamp) of the conversation
-//     ///
-//     /// returns: PathBuf
-//     ///
-//     fn conversation_path(&self, conversation: &str) -> PathBuf {
-//         self.base_path.join(conversation)
-//     }
-//
-//     /// Returns the conversation with the given name
-//     pub async fn load_conversation(&mut self, name: &str) -> Result<Conversation> {
-//         // Find conversation
-//         let path = self.conversation_path(name);
-//
-//         // Load conversation from disk
-//         let content = fs::read_to_string(&path).await?;
-//
-//         // Deserialize and update
-//         let mut loaded_conversation: Conversation = serde_yaml::from_str(&content)?;
-//         loaded_conversation.client = Some(self.client.clone());
-//         loaded_conversation.path = path;
-//         loaded_conversation.name = name.to_string();
-//         loaded_conversation.mark_updated();
-//
-//         Ok(loaded_conversation)
-//     }
-//
-//     /// Creates a new empty conversation and returns the name
-//     ///
-//     /// # Arguments
-//     ///
-//     /// * `parameters`:
-//     ///
-//     /// returns: Result<String, RustGPTError>
-//     pub async fn new_conversation(&mut self, parameters: CompletionParameters) -> Result<Conversation> {
-//         // Create conversation and save
-//         let name = chrono::Utc::now().format("%Y%m%d%H%M%S.yaml").to_string();
-//         let path = self.base_path().join(name);
-//         let conversation = Conversation::new(parameters, path, Some(self.client.clone()));
-//
-//         Ok(conversation)
-//     }
-//
-//     /// Saves the conversation to disk. Updates the conversation to mark `updated` as false.
-//     ///
-//     /// # Arguments
-//     ///
-//     /// * `name`: Name of the conversation (timestamp)
-//     ///
-//     /// returns: Result<(), RustGPTError>
-//     pub async fn save_conversation(&mut self, conversation: &mut Conversation) -> Result<()> {
-//         // Check if the conversation has changed
-//         if !conversation.has_changed() {
-//             return Ok(());
-//         }
-//
-//         // Serialize the conversation
-//         let content = serde_yaml::to_string(conversation)?;
-//
-//         // Save to disk
-//         let Ok(_) = fs::write(&conversation.path, content).await else {
-//             return Err(RustGPTError::WriteConversation(conversation.path.display().to_string()));
-//         };
-//         conversation.mark_updated();
-//
-//         Ok(())
-//     }
-// }
+/// Creates a new chat client
+pub fn create_chat_client() -> ClientRef{
+    Arc::new(async_openai::Client::new())
+}
