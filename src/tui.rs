@@ -41,9 +41,6 @@ pub struct Application {
     // Signal if the application should keep running or not
     keep_running: bool,
 
-    n: u64,
-
-    // Backend terminal
     terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
 }
 
@@ -94,7 +91,6 @@ impl Application {
 
         // Draw the terminal
 
-        self.n += 1;
         terminal.draw(|frame| {
             // Create the layout
             let layout_l1 = Layout::default()
@@ -164,12 +160,6 @@ impl Application {
                 .block(Block::default()
                     .borders(Borders::TOP));
             frame.render_widget(status, *frame_status);
-
-            // let greeting = Block::default()
-            //     .title(format!("Hello from ChatGPT {}", self.n))
-            //     .borders(Borders::ALL);
-            //
-            // frame.render_widget(greeting, frame.size());
         })?;
 
         Ok(())
@@ -238,8 +228,6 @@ impl Default for Application {
         Application {
             terminal: None,
             keep_running: true,
-
-            n: 0,
         }
     }
 }
