@@ -11,7 +11,7 @@ async fn conversation_operations() {
     let parameters = CompletionParametersBuilder::default().build()
         .expect("default parameters");
     let system_message = "You are a helpful assistant";
-    let mut conversation = Conversation::build(parameters, path, system_message)
+    let mut conversation = Conversation::build(parameters, path.clone(), system_message)
         .expect("basic conversation");
 
     // .. check name
@@ -70,6 +70,15 @@ async fn conversation_operations() {
         let n = (id % 3) + 1;
         assert_eq!(s.content, format!("Query{}", n));
     }
+
+    // Save the conversation
+    conversation.save().await
+        .expect("save conversation");
+
+    // Load the conversation and compare
+    let loaded_conversation = Conversation::load(&path).await
+        .expect("load conversation");
+    assert_eq!(conversation, loaded_conversation);
 }
 
 #[tokio::test]

@@ -6,6 +6,7 @@ use async_openai::config::OpenAIConfig;
 use async_openai::types::{ChatCompletionRequestMessageArgs, CreateChatCompletionRequestArgs, Role};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use tokio::fs;
 use uuid::Uuid;
 
 use crate::{Result, RustGPTError};
@@ -54,7 +55,7 @@ impl ToString for CompletionModel {
 /// assert!(bad_parameters.is_err())
 ///
 /// ```
-#[derive(Debug, Serialize, Deserialize, Builder, Clone)]
+#[derive(Debug, Serialize, Deserialize, Builder, Clone, PartialEq)]
 #[builder(build_fn(validate = "Self::validate"))]
 pub struct CompletionParameters {
     #[builder(default = "1.0")]
@@ -101,7 +102,7 @@ impl CompletionParametersBuilder {
 }
 
 /// Represents a single message interaction with ChatGPT
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Message {
     /// Unique ID to identify the conversation
     id: Uuid,
@@ -158,21 +159,18 @@ impl Message {
     pub fn index(&self) -> u8 { self.index }
     pub fn role(&self) -> &Role { &self.role }
     pub fn content(&self) -> &str { &self.content }
+    pub fn id(&self) -> Uuid { self.id }
 }
 
 /// Represents a Conversation with OpenAI, with initial parameters and
 /// all interactions.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Conversation {
     default_parameters: CompletionParameters,
     interactions: HashMap<Uuid, Message>,
 
     /// Name of the conversation
     name: String,
-
-    /// Set to true when the conversation has been changed and needs to be saved to disk
-    #[serde(skip)]
-    updated: bool,
 
     /// Path to where the file is stored
     #[serde(skip)]
@@ -205,7 +203,6 @@ impl Conversation {
     ///
     /// let mut conversation = Conversation::build(parameters, PathBuf::new(), "You are a helpful assistant")
     /// .expect("build conversation");
-    /// assert!(conversation.has_changed(), "New conversations are marked as changed as they haven't been saved.");
     /// ```
     pub fn build(parameters: CompletionParameters, path: PathBuf, system_message: &str) -> Result<Self> {
         // Create a system message
@@ -222,7 +219,6 @@ impl Conversation {
         Ok(Conversation {
             default_parameters: parameters,
             interactions,
-            updated: true,
             path,
             name: String::new(),
         })
@@ -402,8 +398,6 @@ impl Conversation {
                 .map(|msg| (msg.id, msg))
         );
 
-        self.updated = true;
-
         Ok(message_ids)
     }
 
@@ -469,11 +463,6 @@ impl Conversation {
             .collect())
     }
 
-    /// Returns if the conversation needs updating
-    pub fn has_changed(&self) -> bool {
-        self.updated
-    }
-
     /// Returns the name of the conversation
     pub fn name(&self) -> &str {
         &self.name
@@ -493,6 +482,39 @@ impl Conversation {
         std::mem::swap(&mut name, &mut self.name);
 
         name
+    }
+
+    /// Tries to save the conversation to disk
+    pub async fn save(&self) -> Result<()>{
+        // Serialize
+        let data = serde_yaml::to_string(self)?;
+
+        // Save to the path
+        fs::write(&self.path, data.as_bytes()).await?;
+
+        Ok(())
+    }
+
+    /// Tries to load a conversation from disk
+    ///
+    /// # Arguments
+    ///
+    /// * `path`:
+    ///
+    /// returns: Result<Conversation, RustGPTError>
+    pub async fn load<T>(path: T) -> Result<Self>
+    where
+        T: Into<PathBuf>
+    {
+        // Load file
+        let path: PathBuf = path.into();
+        let data = fs::read_to_string(&path).await?;
+
+        // Deserialize conversation
+        let mut conversation: Self = serde_yaml::from_str(&data)?;
+        conversation.path = path;
+
+        Ok(conversation)
     }
 }
 
