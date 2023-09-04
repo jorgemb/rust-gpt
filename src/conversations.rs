@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -516,6 +516,17 @@ impl Conversation {
 
         Ok(conversation)
     }
+
+    /// Returns a depth-first iterator of the conversation
+    pub fn iter(&self) -> ConversationIter{
+        let mut current_stack = VecDeque::new();
+        current_stack.push_front(self.get_root_message());
+        
+        ConversationIter{
+            conversation: self,
+            current_stack,
+        }
+    }
 }
 
 type ClientRef = Arc<async_openai::Client<OpenAIConfig>>;
@@ -523,4 +534,29 @@ type ClientRef = Arc<async_openai::Client<OpenAIConfig>>;
 /// Creates a new chat client
 pub fn create_chat_client() -> ClientRef{
     Arc::new(async_openai::Client::new())
+}
+
+/// Allows depth first iteration over a conversation
+pub struct ConversationIter<'a>{
+    conversation: &'a Conversation,
+    current_stack: VecDeque<&'a Message>,
+}
+
+impl<'a> Iterator for ConversationIter<'a>{
+    type Item = &'a Message;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Some(current_message) = self.current_stack.pop_front() else {
+            return None
+        };
+
+        // Get children
+        let current_id = current_message.id;
+        let children = self.conversation.get_children(current_id);
+        for c in children.into_iter().rev(){
+            self.current_stack.push_front(c);
+        }
+
+        Some(current_message)
+    }
 }
