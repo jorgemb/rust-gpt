@@ -1,4 +1,3 @@
-use std::path::Path;
 use crate::test_util::TempDirectoryHandler;
 
 use super::*;

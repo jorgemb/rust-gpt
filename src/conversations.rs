@@ -158,7 +158,7 @@ impl Message {
     }
     pub fn index(&self) -> u8 { self.index }
     pub fn role(&self) -> &Role { &self.role }
-    pub fn content(&self) -> &str { &self.content }
+    pub fn content(&self) -> &String { &self.content }
     pub fn id(&self) -> Uuid { self.id }
 }
 
