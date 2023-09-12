@@ -155,15 +155,17 @@ async fn show_conversation(params: ShowConversation) {
         println!("{}", table);
 
     } else {
-        todo!();
         // Show all of the latest messages
-        // let mut table = Table::new();
-        // table.add_row(row!["CONVERSATION INDEX", "PREVIEW"]);
-        // for (i, conversation) in latest.iter().enumerate() {
-        //     table.add_row(row![i, conversation.content()[..60]]);
-        // }
-        //
-        // table.printstd();
+        let mut table_builder = builder::Builder::default();
+        table_builder.set_header(["INDEX", "LAST RESPONSE"]);
+        for (i, msg) in latest.iter().enumerate(){
+            table_builder.push_record([i.to_string(), msg.content().to_string()]);
+        }
+        let mut table = table_builder.build();
+
+        // TODO: Calculate the width of the terminal for this width
+        table.with(Modify::list(Columns::last(), Wrap::new(100)));
+        println!("{}", table);
     }
 }
 
