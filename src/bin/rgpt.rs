@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use tabled::builder;
-use tabled::settings::{Modify, Width};
+use tabled::settings::Modify;
 use tabled::settings::object::Columns;
 use tabled::settings::width::Wrap;
 
