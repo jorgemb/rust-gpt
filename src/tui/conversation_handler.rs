@@ -1,5 +1,8 @@
 use std::path::Path;
 
+use ratatui::prelude::Color;
+use ratatui::style::Style;
+use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 use tokio::fs;
 
@@ -51,10 +54,26 @@ pub fn conversation_widget(conversation: &Conversation, scrolling: u16) -> Resul
 
     // Parse messages
     let messages = conversation.get_message_list(None)?;
-    let last_message = messages.last().unwrap();
+
+    // Create paragraph
+    let mut text = Vec::with_capacity(messages.len() * 2);
+    for msg in messages.iter() {
+        // Create role
+        let role_line = Line::styled(format!("--{}", msg.role()),
+                                     Style::default()
+                                         .fg(Color::Yellow));
+        text.push(role_line);
+
+        // Create content
+        text.extend(
+        msg.content()
+            .split('\n')
+            .map(|line| Line::styled(line, Style::default()))
+        );
+    }
 
     Ok(
-        Paragraph::new(last_message.content().clone())
+        Paragraph::new(text)
             .wrap(wrap)
             .scroll((scrolling, 0))
     )

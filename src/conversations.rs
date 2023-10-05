@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::{ChatCompletionRequestMessageArgs, CreateChatCompletionRequestArgs, Role};
 use derive_builder::Builder;
+use log::{debug, error};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
@@ -407,10 +408,12 @@ impl Conversation {
 
         // Validate that the given message is a user message
         let Some(message) = self.interactions.get(&message_id) else {
+            error!("Trying to add a message to a conversation that doesn't exist");
             return Err(RustGPTError::MessageNotPartOfConversation);
         };
 
         if message.role != Role::User {
+            error!("Role can only be User");
             return Err(RustGPTError::InvalidMessageRole);
         };
 
@@ -451,10 +454,13 @@ impl Conversation {
             .build()?;
 
         // Perform the completion request
+        debug!("Sending request to ChatGPT");
         let completion = client.chat().create(completion_request).await?;
+        debug!("Request sent to ChatGPT");
         let responses: Vec<_> = completion.choices.into_iter()
             .filter_map(|choice| choice.message.content)
             .collect();
+        debug!("Response from ChatGPT: {:?}", responses);
 
         let added_id = self.add_children_to_message(message_id, responses, Role::Assistant)?;
 
@@ -504,7 +510,7 @@ impl Conversation {
     /// returns: Result<Conversation, RustGPTError>
     pub async fn load<T>(path: T) -> Result<Self>
     where
-        T: Into<PathBuf>
+        T: Into<PathBuf> + std::fmt::Debug
     {
         // Load file
         let path: PathBuf = path.into();

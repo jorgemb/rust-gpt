@@ -12,13 +12,14 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::prelude::Modifier;
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, ListState, Paragraph, Wrap};
 use thiserror::Error;
 use tokio::{io, select, time};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
+use log::{debug, error, info};
 
-use crate::conversations::Conversation;
+use crate::conversations::{Conversation, create_chat_client};
 
 mod conversation_handler;
 
@@ -28,7 +29,7 @@ pub enum ApplicationError {
     IOError(#[from] io::Error),
 
     #[error("Error while processing input.")]
-    InputError(#[from] tokio::sync::mpsc::error::SendError<ApplicationMessage>),
+    InputError(#[from] mpsc::error::SendError<ApplicationMessage>),
 
     #[error("Error on async task")]
     TokioError(#[from] tokio::task::JoinError),
@@ -61,6 +62,11 @@ pub enum ApplicationMessage {
     ScrollForward,
     ScrollBack,
 
+    // INPUT
+    PartialInput(String),
+    Input(String),
+
+    // STATUS
     /// Shows a status message
     StatusMessage(String),
 }
@@ -90,17 +96,23 @@ pub struct Application {
     conversation_list_status: ListState,
     /// Amount of scrolling in the conversation
     conversation_scrolling: u16,
+
+    // INPUT
+    /// Contains current input
+    current_input: String,
 }
 
 impl Application {
     pub async fn start(mut app: Application) -> Result<()> {
         let (tx, rx) = mpsc::channel(32);
 
+        info!("Starting input thread");
         let input_tx = tx.clone();
         let input_handle = tokio::task::spawn_blocking(move || {
             Self::handle_input(input_tx)
         });
 
+        info!("Starting render thread");
         let render_tx = tx.clone();
         let render_handle = tokio::task::spawn(async move {
             app.run(rx, render_tx).await
@@ -111,12 +123,14 @@ impl Application {
 
         select! {
             _ = render_handle => {
-                println!("Render finished");
+                info!("Render finished");
             }
             _ = input_handle => {
-                println!("Input finished");
+                info!("Input finished");
             }
         }
+
+        info!("App finishing");
 
         Ok(())
     }
@@ -136,8 +150,12 @@ impl Application {
             if let Some(msg) = messages.recv().await {
                 match msg {
                     ApplicationMessage::Quit => self.keep_running = false,
-                    ApplicationMessage::Heartbeat => self.update()?,
+                    ApplicationMessage::Heartbeat => {
+                        self.update()?
+                    }
                     ApplicationMessage::ApplicationStart => {
+                        info!("Application start message received");
+
                         // Refresh the conversations
                         if let Some(sender) = self.sender.as_ref() {
                             let _ = sender.send(ApplicationMessage::LoadConversations).await;
@@ -145,9 +163,11 @@ impl Application {
                     }
                     ApplicationMessage::LoadConversations => {
                         // Refresh the conversations
+                        info!("Refreshing conversations");
                         self.refresh_conversations().await;
                     }
                     ApplicationMessage::StatusMessage(msg) => {
+                        info!("Status message ({})", msg);
                         self.status_queue.push_back(msg);
                     }
                     ApplicationMessage::NextConversation => {
@@ -157,6 +177,7 @@ impl Application {
                         };
 
                         self.conversation_list_status.select(Some(next_id));
+                        self.conversation_scrolling = 0;
                     }
                     ApplicationMessage::PreviousConversation => {
                         let previous_id = match self.conversation_list_status.selected() {
@@ -165,12 +186,57 @@ impl Application {
                         };
 
                         self.conversation_list_status.select(Some(previous_id));
+                        self.conversation_scrolling = 0;
                     }
                     ApplicationMessage::ScrollForward =>
                         self.conversation_scrolling = self.conversation_scrolling.saturating_add(1),
 
                     ApplicationMessage::ScrollBack =>
                         self.conversation_scrolling = self.conversation_scrolling.saturating_sub(1),
+                    ApplicationMessage::PartialInput(input) => self.current_input = input,
+                    ApplicationMessage::Input(input) => {
+                        // Clear input
+                        self.current_input = String::new();
+
+                        // TODO: If input is empty, skip or try again if last message is from user
+
+                        // Get the selected conversation
+                        let Some(conversation) = self.current_selected_conversation() else {
+                            self.send_status_message("Error retrieving current conversation".to_string()).await;
+                            continue;
+                        };
+
+                        // Add the message
+                        let latest_messages = conversation.get_latest_messages();
+                        let Some(last_message) = latest_messages.last() else {
+                            self.send_status_message("Error while getting conversation messages".to_string()).await;
+                            continue;
+                        };
+                        let message_id = last_message.id();
+
+                        let Some(query_message) = (match conversation.add_queries(message_id, vec![input]) {
+                            Ok(mut queries) => queries.pop(),
+                            Err(error) => {
+                                self.send_status_message(format!("Error while completing conversation: {}", error)).await;
+                                continue;
+                            }
+                        }) else {
+                            self.send_status_message("Couldn't add query message to the conversation.".to_string()).await;
+                            continue;
+                        };
+
+                        // Send GPT message
+                        info!("Starting completion");
+                        let client = create_chat_client();
+                        let query_message_id= query_message.id();
+                        if let Err(error) = conversation.do_completion(query_message_id, client, None).await {
+                            error!("Error while communicating with ChatGPT: {}", error);
+                            self.send_status_message(format!("Error while communicating with ChatGPT: {}", error)).await;
+                        } else {
+                            info!("Completion finished successfully");
+                            self.send_status_message("Completion finished successfully".to_string()).await;
+                        }
+                    }
                 }
             }
         }
@@ -232,7 +298,6 @@ impl Application {
             let menu = Paragraph::new("CHAT")
                 .block(Block::default()
                     .borders(Borders::ALL)
-                    // .title("RustGPT")
                     .title(title)
                     .title_alignment(Alignment::Center));
             frame.render_widget(menu, *frame_menu);
@@ -269,9 +334,11 @@ impl Application {
             }
 
             // Create input
-            let input = Block::default()
-                .title("Input")
-                .borders(Borders::ALL);
+            let input = Paragraph::new(self.current_input.as_str())
+                .wrap(Wrap { trim: false })
+                .block(Block::default()
+                    .title("Input")
+                    .borders(Borders::ALL));
             frame.render_widget(input, *frame_input);
 
             // Create status
@@ -309,6 +376,7 @@ impl Application {
 
     fn handle_input(sender: mpsc::Sender<ApplicationMessage>) -> Result<()> {
         let mut start_time = Instant::now();
+        let mut partial_input = String::new();
         let heartbeat_duration = Duration::from_millis(100);
         loop {
             // Poll input
@@ -334,6 +402,18 @@ impl Application {
                             (KeyCode::Up, KeyEventKind::Press, KeyModifiers::SHIFT) => {
                                 sender.blocking_send(ApplicationMessage::PreviousConversation)?;
                             }
+                            (KeyCode::Char(c), KeyEventKind::Press, _) => {
+                                partial_input.push(c);
+                                sender.blocking_send(ApplicationMessage::PartialInput(partial_input.clone()))?;
+                            }
+                            (KeyCode::Backspace, KeyEventKind::Press, _) => {
+                                let _ = partial_input.pop();
+                                sender.blocking_send(ApplicationMessage::PartialInput(partial_input.clone()))?;
+                            }
+                            (KeyCode::Enter, KeyEventKind::Press, _) => {
+                                sender.blocking_send(ApplicationMessage::Input(partial_input))?;
+                                partial_input = String::new();
+                            }
                             _ => {}
                         }
                     }
@@ -346,6 +426,8 @@ impl Application {
             if start_time.elapsed() >= heartbeat_duration {
                 sender.blocking_send(ApplicationMessage::Heartbeat)?;
                 start_time = time::Instant::now();
+
+                debug!("Heartbeat sent: {:?}", start_time);
             }
         }
 
@@ -368,7 +450,6 @@ impl Application {
     }
 
 
-
     /// Loads the conversations from disk
     async fn refresh_conversations(&mut self) {
         // Load all conversations
@@ -387,6 +468,29 @@ impl Application {
 
         // Reset selection
         self.conversation_list_status.select(Some(0));
+    }
+
+    /// Returns the current selected conversation
+    fn current_selected_conversation(&mut self) -> Option<&mut Conversation> {
+        let Some(current_id) = self.conversation_list_status.selected() else {
+            return None;
+        };
+
+        self.loaded_conversations.get_mut(current_id)
+    }
+
+
+    /// Sends a status message to show to the user
+    ///
+    /// # Arguments
+    ///
+    /// * `message`:
+    ///
+    /// returns: ()
+    async fn send_status_message(&self, message: String) {
+        if let Some(sender) = self.sender.as_ref() {
+            let _ = sender.send(ApplicationMessage::StatusMessage(message)).await;
+        }
     }
 }
 
@@ -409,6 +513,8 @@ impl Default for Application {
             loaded_conversations: Vec::new(),
             conversation_list_status: ListState::default(),
             conversation_scrolling: 0,
+
+            current_input: String::new(),
         }
     }
 }
